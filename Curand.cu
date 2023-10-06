@@ -110,6 +110,26 @@ __global__ void apply_forces(Particle *particles, RNG* rand_state, double sqrt_d
     p.vx -= GAMMA / mass * p.vx * dt;
     p.vy -= GAMMA / mass * p.vy * dt;
 
+    // Simulate collision using linear spring forces
+    const double k = 1.0; 
+
+    for (auto j : {-1, 1}) {
+        j = (i + j + N) % N;  
+        Particle q = particles[j];
+        double dx = p.x - q.x;
+        double dy = p.y - q.y;
+        double dist = sqrt(dx * dx + dy * dy);
+
+        if (dist < 2 * RADIUS) {  
+            double force = -k * (dist - 2 * RADIUS);  
+            double force_x = force * dx / dist;  
+            double force_y = force * dy / dist;
+
+            p.vx += force_x * dt;  
+            p.vy += force_y * dt;
+        }
+    }
+
     // Apply random force
     RNG local_rand_state = rand_state[i];
     double2 r = curand_uniform2_double(&local_rand_state); 

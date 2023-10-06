@@ -2,7 +2,7 @@
 CXX = nvcc 
 
 # Compiler Flags
-CXXFLAGS = -Xcompiler -Wall -O3 -std=c++17 -arch=sm_80
+CXXFLAGS = -Xcompiler -Wall -O3 -std=c++17 -arch=sm_70
 
 INCLUDES = -Iinclude
 
