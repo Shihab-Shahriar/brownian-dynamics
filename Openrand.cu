@@ -2,10 +2,9 @@
 #include <cmath>
 #include <sstream>
 #include <vector>
-#include <algorithm>
 #include <cuda_runtime.h>
 
-#include "phillox.h"
+#include "Openrand/phillox.h"
 
 #define FQUALIFIER __host__ __device__
 
@@ -103,34 +102,12 @@ __global__ void apply_forces(Particle *particles, int counter, double sqrt_dt){
     p.vx -= GAMMA / mass * p.vx * dt;
     p.vy -= GAMMA / mass * p.vy * dt;
 
-    // Simulate collision using linear spring forces
-    const double k = 2.0; 
-
-    for (auto j : {-1, 1}) {
-        j = (i + N + j) % N;  
-        Particle q = particles[j];
-        double dx = p.x - q.x;
-        double dy = p.y - q.y;
-        double dist = sqrt(dx * dx + dy * dy);
-
-        if (dist < 4 * RADIUS) {  
-            double force = -k * (dist - 2 * RADIUS);  
-            double force_x = force * dx / dist;  
-            double force_y = force * dy / dist;
-
-            p.vx += force_x * dt;  
-            p.vy += force_y * dt;
-        }
-    }
-
     // Apply random force
     RNG local_rand_state(p.pid, counter);
     
-    //double2 r = curand_uniform2_double(&local_rand_state); 
-    auto x = local_rand_state.rand<double>();
-    auto y = local_rand_state.rand<double>();
-    p.vx += (x  * 2.0 - 1.0) * sqrt_dt;
-    p.vy += (y  * 2.0 - 1.0) * sqrt_dt;
+    rnd::double2 r = local_rand_state.draw_double2(); 
+    p.vx += (r.x  * 2.0 - 1.0) * sqrt_dt;
+    p.vy += (r.y  * 2.0 - 1.0) * sqrt_dt;
     particles[i] = p;
 
 }
@@ -157,7 +134,7 @@ __global__ void update_positions(Particle *particles){
 }
 
 
-void test(Particle *particles, int nthreads){
+int main(){
     const double sqrt_dt = std::sqrt(2.0 * T * GAMMA / mass * dt); // Standard deviation for random force
     std::cout << "sqrt_dt: " << sqrt_dt << "\n";
 
@@ -165,6 +142,11 @@ void test(Particle *particles, int nthreads){
     std::cout << "density: " << density << "\n";
 
 
+    // allocate particles
+    Particle *particles;
+    checkCudaErrors(cudaMallocManaged((void **)&particles, N * sizeof(Particle)));
+
+    const int nthreads = 256;
     const int nblocks = (N + nthreads - 1) / nthreads;
 
     // Initialize particles
@@ -185,46 +167,10 @@ void test(Particle *particles, int nthreads){
         checkCudaErrors(cudaDeviceSynchronize());
     }
 
-
-}
-
-int main(int argc, char **argv) {
-    // allocate particles
-    Particle *particles;
-    checkCudaErrors(cudaMallocManaged((void **)&particles, N * sizeof(Particle)));
-
-    bool benchmark = false;
-
-    if(benchmark){
-        // benchmark
-        test(particles, 256);
-        return 0;
-    }
-    else{
-        // Reproducibility check
-        test(particles, 256);
-        Particle *particles2;
-        checkCudaErrors(cudaMallocManaged((void **)&particles2, N * sizeof(Particle)));
-        test(particles2, 512);
-
-        // Reproducibility check
-        std::vector<double> errors (N*2);
-        for(int i=0; i<N; i++){
-            errors[i*2] = particles[i].x - particles2[i].x;
-            errors[i*2+1] = particles[i].y - particles2[i].y;
-        }
-
-        // To reduce floating point errors
-        std::sort(errors.begin(), errors.end());
-        
-        // average error
-        double avg = 0;
-        for(int i=0; i<N; i++){
-            avg += errors[i];
-        }
-        std::cout << "Total error: " << avg << "\n";
-        cudaFree(particles2);
-    }
+    // Reproducibility check: output the positions. Turn off for benchmarking
+//     for(int i=0; i<N; i++){
+//         std::cout << particles[i].x << " " << particles[i].y << "\n";
+//     }
 
     cudaFree(particles);
     return 0;

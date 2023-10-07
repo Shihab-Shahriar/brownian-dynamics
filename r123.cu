@@ -2,12 +2,15 @@
 #include <cmath>
 #include <sstream>
 #include <vector>
-#include <curand_kernel.h>
 #include <cuda_runtime.h>
 
-#define DEVICE __host__ __device__
+#include "Random123/philox.h"
+#include "Random123/uniform.hpp"
+
+#define FQUALIFIER __host__ __device__
 
 #define PI           3.14159265358979323846 
+#define GLOBAL_SEED 0x43
 
 // limited version of checkCudaErrors from helper_cuda.h in CUDA examples
 #define checkCudaErrors(val) check_cuda( (val), #val, __FILE__, __LINE__ )
@@ -22,7 +25,8 @@ void check_cuda(cudaError_t result, char const *const func, const char *const fi
     }
 }
 
-typedef curandStatePhilox4_32_10_t RNG;
+typedef r123::Philox4x32 RNG;
+
 
 // Radius of particles
 const double RADIUS = 1.0;
@@ -46,12 +50,12 @@ struct Particle {
 
     int pid = 0;
 
-    DEVICE Particle(double x, double y) : x(x), y(y) 
+    FQUALIFIER Particle(double x, double y) : x(x), y(y) 
     {
 
     }
 
-    DEVICE void update(double dx, double dy) {
+    FQUALIFIER void update(double dx, double dy) {
         x += dx; 
         if(x < 0)
             x = 0;
@@ -67,17 +71,8 @@ struct Particle {
 
 };
 
-__global__ void rand_init(RNG *rand_state) {
-    int i = threadIdx.x + blockIdx.x * blockDim.x;
-    if(i >= N) 
-        return;
 
-    // TODO: Each thread gets different seed, same sequence for
-    // performance improvement of about 2x!
-    curand_init(1984, i, 0, &rand_state[i]);
-}
-
-__global__ void init_particles(Particle *particles, RNG * rand_state){
+__global__ void init_particles(Particle *particles, int counter){
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if(i >= N)
         return;
@@ -85,24 +80,39 @@ __global__ void init_particles(Particle *particles, RNG * rand_state){
     Particle p = particles[i];
     p.pid = i;
 
-    RNG local_rand_state = rand_state[i];
+    RNG rng;
+    RNG::ctr_type c={{}};
+    RNG::ukey_type uk={{}};
+    uk[0] = p.pid;
+    RNG::key_type k=uk;
 
-    double2 r = curand_uniform2_double(&local_rand_state); 
-    auto x = r.x * double(windowWidth) - 1.0;
-    auto y = r.y * double(windowHeight) - 1.0;
+    c[0] = counter; 
+    c[1] = 0;
+    RNG::ctr_type r = rng(c, k);
+
+    uint64_t xu =
+        (static_cast<uint64_t>(r[0]) << 32) | static_cast<uint64_t>(r[1]);
+    uint64_t yu =
+        (static_cast<uint64_t>(r[2]) << 32) | static_cast<uint64_t>(r[3]);
+    auto x = r123::u01<double, uint64_t>(xu);
+    auto y = r123::u01<double, uint64_t>(yu);
     p.update(x, y);
 
-    r = curand_uniform2_double(&local_rand_state); 
-    p.vx = r.x * 100 - 50.0;
-    p.vy = r.y * 100 - 50.0;
+    // increment counter
+    c[1]++;
+    r = rng(c, k);
 
-    rand_state[i] = local_rand_state;
+    xu = (static_cast<uint64_t>(r[0]) << 32) | static_cast<uint64_t>(r[1]);
+    yu = (static_cast<uint64_t>(r[2]) << 32) | static_cast<uint64_t>(r[3]);
+    
+    p.vx = r123::u01<double, uint64_t>(xu) * 100 - 50.0;
+    p.vy = r123::u01<double, uint64_t>(yu) * 100 - 50.0;
+
     particles[i] = p;
 }
 
 
-template <typename RNG>
-__global__ void apply_forces(Particle *particles, RNG* rand_state, double sqrt_dt){
+__global__ void apply_forces(Particle *particles, int counter, double sqrt_dt){
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if(i >= N)
         return;
@@ -113,11 +123,25 @@ __global__ void apply_forces(Particle *particles, RNG* rand_state, double sqrt_d
     p.vy -= GAMMA / mass * p.vy * dt;
 
     // Apply random force
-    RNG local_rand_state = rand_state[i];
-    double2 r = curand_uniform2_double(&local_rand_state); 
-    p.vx += (r.x  * 2.0 - 1.0) * sqrt_dt;
-    p.vy += (r.y  * 2.0 - 1.0) * sqrt_dt;
-    rand_state[i] = local_rand_state;
+    RNG rng;
+    RNG::ctr_type c={{}};
+    RNG::ukey_type uk={{}};
+    uk[0] = p.pid;
+    RNG::key_type k=uk;
+
+    c[0] = counter; 
+    c[1] = 0;
+    RNG::ctr_type r = rng(c, k);
+
+    uint64_t xu =
+        (static_cast<uint64_t>(r[0]) << 32) | static_cast<uint64_t>(r[1]);
+    uint64_t yu =
+        (static_cast<uint64_t>(r[2]) << 32) | static_cast<uint64_t>(r[3]);
+    auto x = r123::u01<double, uint64_t>(xu);
+    auto y = r123::u01<double, uint64_t>(yu);
+
+    p.vx += (x  * 2.0 - 1.0) * sqrt_dt;
+    p.vy += (y  * 2.0 - 1.0) * sqrt_dt;
     particles[i] = p;
 
 }
@@ -151,9 +175,6 @@ int main(){
     const double density = (N * PI * RADIUS* RADIUS) / (windowWidth * windowHeight);
     std::cout << "density: " << density << "\n";
 
-    // Random number generator setup
-    RNG *d_rand_states;
-    checkCudaErrors(cudaMalloc((void **)&d_rand_states, N*sizeof(RNG)));
 
     // allocate particles
     Particle *particles;
@@ -161,12 +182,9 @@ int main(){
 
     const int nthreads = 256;
     const int nblocks = (N + nthreads - 1) / nthreads;
-    rand_init<<<nblocks, nthreads>>>(d_rand_states);
-    checkCudaErrors(cudaGetLastError());
-    checkCudaErrors(cudaDeviceSynchronize());
 
     // Initialize particles
-    init_particles<<<nblocks, nthreads>>>(particles, d_rand_states);
+    init_particles<<<nblocks, nthreads>>>(particles, 0);
     checkCudaErrors(cudaGetLastError());
     checkCudaErrors(cudaDeviceSynchronize());
 
@@ -174,7 +192,7 @@ int main(){
     // Simulation loop
     int iter = 0;
     while (iter++ < STEPS) {
-        apply_forces<<<nblocks, nthreads>>>(particles, d_rand_states, sqrt_dt);
+        apply_forces<<<nblocks, nthreads>>>(particles, iter, sqrt_dt);
         checkCudaErrors(cudaGetLastError());
         checkCudaErrors(cudaDeviceSynchronize());
 
@@ -182,7 +200,12 @@ int main(){
         checkCudaErrors(cudaGetLastError());
         checkCudaErrors(cudaDeviceSynchronize());
     }
-    cudaFree(d_rand_states);
+
+    // Reproducibility check: output the positions. Turn off for benchmarking
+//     for(int i=0; i<N; i++){
+//         std::cout << particles[i].x << " " << particles[i].y << "\n";
+//     }
+
     cudaFree(particles);
     return 0;
 }

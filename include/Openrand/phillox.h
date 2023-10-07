@@ -68,17 +68,27 @@ public:
     return static_cast<uint64_t>(res);
   }
 
-  rnd::uint4 draw_int4() {
+  DEVICE rnd::uint4 draw_int4() {
     generate();
     return rnd::uint4{_out[0], _out[1], _out[2], _out[3]};
   }
 
-  rnd::float4 draw_float4() {
+  DEVICE rnd::float4 draw_float4() {
     generate();
     return rnd::float4{uniform<float, uint32_t>(_out[0]),
                        uniform<float, uint32_t>(_out[1]),
                        uniform<float, uint32_t>(_out[2]),
                        uniform<float, uint32_t>(_out[3])};
+  }
+
+  DEVICE rnd::double2 draw_double2() {
+    generate();
+    const uint64_t a =
+        (static_cast<uint64_t>(_out[0]) << 32) | static_cast<uint64_t>(_out[1]);
+    const uint64_t b =
+        (static_cast<uint64_t>(_out[2]) << 32) | static_cast<uint64_t>(_out[3]);
+    return rnd::double2{uniform<double, uint64_t>(a),
+                        uniform<double, uint64_t>(b)};
   }
 
 private:
